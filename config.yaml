@@ -1,0 +1,18 @@
+warning_day_limit: 60
+critical_day_limit: 30
+notifiers:
+- type: zendesk
+  requester_email: "monitoring@example.com"
+  requester_name: "ACM monitoring"
+  tags: ["automated", "aws"]
+  ticket_type: "task"
+  zdesk_user: "user@example.com"
+  zdesk_password: "supersecret"
+  zdesk_url: "https://example.zendesk.com"
+  zdesk_token: True
+  group_id: 123456789
+  custom_fields:
+  - id: 12354897,
+    value: "production"
+  - id: 13351546
+    value: "None"
