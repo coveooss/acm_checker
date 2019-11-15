@@ -20,7 +20,7 @@ def notify(config, expirings_certs):
         This probably means that the rotation of the service hasn't been done yet. Contact the team to trigger a new deployment.
         """.format(expirings_cert["CertName"], expirings_cert["InUseBy"],expirings_cert["DomainName"])
         for notifier_config in config["notifiers"]:
-            if notifier_config["type"].lower() == "zendesk":
+            if "type" in notifier_config and notifier_config["type"].lower() == "zendesk":
                 try:
                   connectors.generate_zendesk_ticket(notifier_config, title, message)
                 except Exception as e:
