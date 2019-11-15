@@ -35,7 +35,7 @@ def main(config_file):
 
     with open(config_file, 'r') as stream:
         try:
-            config = yaml.load(stream)
+            config = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             logging.error("Unable to parse file {} : {}".format(config_file, exc))
 
