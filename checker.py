@@ -37,7 +37,7 @@ def main(config_file):
         try:
             config = yaml.load(stream)
         except yaml.YAMLError as exc:
-            print(exc)
+            logging.error("Unable to parse file {} : {}".format(config_file, exc))
 
     expiring_certs = []
 
