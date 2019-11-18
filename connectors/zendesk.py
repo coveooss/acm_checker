@@ -1,4 +1,5 @@
 from zdesk import Zendesk
+from zdesk import get_id_from_url
 
 
 def generate_zendesk_ticket(config, subject, description):
@@ -17,7 +18,7 @@ def generate_zendesk_ticket(config, subject, description):
         "ticket": {
             "requester": {"name": config["requester_name"], "email": config["requester_email"]},
             "subject": subject,
-            "description": description,
+            "description": "Details in comment",
             "tags": config["tags"],
             "type": config["ticket_type"],
             "priority": "normal",
@@ -26,4 +27,14 @@ def generate_zendesk_ticket(config, subject, description):
         }
     }
 
+    ticket_content = {
+        "ticket": {
+            "comment":{
+                "html_body": description
+            }
+        }
+    }
+
     result = zendesk.ticket_create(data=new_ticket)
+    ticket_id = get_id_from_url(result)
+    zendesk.ticket_update(ticket_id, data=ticket_content)
