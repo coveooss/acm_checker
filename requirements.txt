@@ -1,0 +1,6 @@
+pytz
+zdesk
+click
+boto3
+tabulate
+pyyaml
