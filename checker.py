@@ -19,34 +19,43 @@ def notify(config, expirings_certs):
         for notifier_config in config["notifiers"]:
             if notifier_config.get("type", "").lower() == "zendesk":
                 try:
+                  logging.info("Created zendesk ticket for {}".format(expirings_cert["CertName"]))
                   connectors.generate_zendesk_ticket(notifier_config, title, message)
                 except Exception as e:
                     logging.error("Can't create zendesk ticket: {}".format(e))
 
 def format_message(expiring_cert):
-    clientv2 = boto3.client('elbv2')
-    clientv1 = boto3.client('elb')
-    elbs_infos = []
+    global REGION
+    resource_infos = []
     elbs_v1 = []
     elbs_v2 = []
     all_infos_retrieved = False
     count = 0
-    for elb in expiring_cert["InUseBy"]:
-        name = is_classic_elb(elb)
-        if name:
-            elbs_v1.append(name)
+    for resource in expiring_cert["InUseBy"]:
+        if is_loadbalancer(resource):
+            name = is_classic_elb(resource)
+            if name:
+                elbs_v1.append(name)
+            else:
+                elbs_v2.append(resource)
         else:
-            elbs_v2.append(elb)
+            resource_infos.append({
+                'name': resource,
+                'type': "unknown",
+                'tags': "None"
+            })
 
     if elbs_v2:
+        clientv2 = boto3.client('elbv2', region_name=REGION)
         while not all_infos_retrieved:
             if count+19 > len(elbs_v2):
                 tags = clientv2.describe_tags(ResourceArns=elbs_v2[count:len(elbs_v2)])
             else:
                 tags = clientv2.describe_tags(ResourceArns=elbs_v2[count:count + 19])
             for info in tags["TagDescriptions"]:
-                elbs_infos.append({
+                resource_infos.append({
                     'name': info["ResourceArn"],
+                    'type': "elbv2",
                     'tags': ["{}:{}".format(tag["Key"],tag["Value"]) for tag in info["Tags"]]
                 })
             if len(elbs_v2) > count + 19:
@@ -55,6 +64,7 @@ def format_message(expiring_cert):
             all_infos_retrieved = True
 
     if elbs_v1:
+        clientv1 = boto3.client('elb', region_name=REGION)
         all_infos_retrieved = False
         count = 0
         while not all_infos_retrieved:
@@ -63,8 +73,9 @@ def format_message(expiring_cert):
             else:
                 tags = clientv1.describe_tags(LoadBalancerNames=elbs_v1[count:count + 19])
             for info in tags["TagDescriptions"]:
-                elbs_infos.append({
+                resource_infos.append({
                     'name': info["LoadBalancerName"],
+                    'type': "elb",
                     'tags': ["{}:{}".format(tag["Key"],tag["Value"]) for tag in info["Tags"]]
                 })
             if len(elbs_v1) > count + 19:
@@ -72,9 +83,9 @@ def format_message(expiring_cert):
                 continue
             all_infos_retrieved = True
 
-    formated_infos = tabulate(elbs_infos, headers="keys", tablefmt="html")
+    formated_infos = tabulate(resource_infos, headers="keys", tablefmt="html")
 
-    tittle = "{} - Certificate {} is going to expire".format(expiring_cert["Criticality"], expiring_cert["CertName"])
+    title = "{} - Certificate {} is going to expire".format(expiring_cert["Criticality"], expiring_cert["CertName"])
     message = """
     <b>{}</b> is going to expire ({}).<br>
     <b>DomainName</b>: {}<br>
@@ -85,13 +96,17 @@ def format_message(expiring_cert):
     This probably means that the rotation of the service hasn't been done yet. Contact the team to trigger a new deployment.
     """.format(expiring_cert["CertName"], expiring_cert["ExpireDate"], expiring_cert["DomainName"], REGION, formated_infos)
 
-    return tittle, message
+    return title, message
 
 def is_classic_elb(arn):
     if not re.match(r".*loadbalancer/app.*", arn):
         m = re.match(r"\w+:\w+:\w+:\S+:\w+\/(\S+)", arn)
         return m.groups()[0]
     return False
+
+
+def is_loadbalancer(resource):
+    return bool(re.match(r".*loadbalancer.*", resource))
 
 @click.command()
 @click.option("--config_file", default="config.yaml", help="Specify the config to use")
