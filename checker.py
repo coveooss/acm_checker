@@ -7,24 +7,41 @@ import pytz
 import connectors
 import re
 from tabulate import tabulate
+from botocore.exceptions import ClientError
 
 REGION = "us-east-1"
 
-def notify(config, expirings_certs):
+def notify(config, expirings_certs, notification_db):
+    """
+    Iterate over all expiring certificates and notify every endpoint
+    :param config: Config read from config file
+    :param expirings_certs: list of unnotified expiring certificates
+    :param notification_db: DynamoDB object where record of notification are stored.
+    """
 
     global REGION
 
     for expirings_cert in expirings_certs:
         title, message = format_message(expirings_cert)
+        notified = False
+        add_notified_cert(notification_db, expirings_cert["CertName"])
         for notifier_config in config["notifiers"]:
             if notifier_config.get("type", "").lower() == "zendesk":
                 try:
                   logging.info("Created zendesk ticket for {}".format(expirings_cert["CertName"]))
                   connectors.generate_zendesk_ticket(notifier_config, title, message)
+                  notified = True
                 except Exception as e:
                     logging.error("Can't create zendesk ticket: {}".format(e))
+            if notified:
+                add_notified_cert(notification_db, expirings_cert["CertName"])
 
 def format_message(expiring_cert):
+    """
+    Create an HTML formatted message for the notification
+    :param expiring_cert: cert info
+    :return: Tuple with subject an body
+    """
     global REGION
     resource_infos = []
     elbs_v1 = []
@@ -99,6 +116,11 @@ def format_message(expiring_cert):
     return title, message
 
 def is_classic_elb(arn):
+    """
+    Test ELB version
+    :param arn: ELB arn
+    :return: True if ELBv1 false if ELBv2
+    """
     if not re.match(r".*loadbalancer/app.*", arn):
         m = re.match(r"\w+:\w+:\w+:\S+:\w+\/(\S+)", arn)
         return m.groups()[0]
@@ -106,11 +128,75 @@ def is_classic_elb(arn):
 
 
 def is_loadbalancer(resource):
+    """
+    Test if the given resource arn stick to an ELB
+    :param resource: Resource arn
+    :return: True if it's an ELB, false if not
+    """
     return bool(re.match(r".*loadbalancer.*", resource))
+
+
+def get_notified_certs(table):
+    """
+    Retrieve all past notifications
+    :param table: Dynamo table use to store record
+    :return: Return true if succeed
+    """
+    try:
+        response = table.scan()
+    except ClientError as e:
+        raise(e)
+    else:
+        return [ cert["arn"] for cert in response['Items']]
+
+
+def add_notified_cert(table, arn):
+    """
+    Add record about a notification for given arn
+    :param table: Dynamo table use to store record
+    :param arn: arn of the certificate
+    :return: Return true if succeed
+    """
+    try:
+        response = table.put_item(
+            Item={
+                'arn': arn,
+                'notifiedTime': str(datetime.datetime.utcnow())
+            }
+        )
+    except Exception as e:
+        raise(e)
+    else:
+        logging.info("{} successfully added to DynamoDB (ID : {})".format(
+            arn, response['ResponseMetadata']['RequestId']))
+        return True
+
+
+def del_notified_cert(table, arn):
+    """
+    Delete notification record if certificate doesn't exist anymore
+    :param table: Dynamo table use to store record
+    :param arn: arn of the certificate
+    :return: Return true if succeed
+    """
+    try:
+        response = table.delete_item(
+            Key={
+                'arn': arn
+            }
+        )
+    except ClientError as e:
+        raise(e)
+    else:
+        logging.info("{} successfully deleted from DynamoDB (ID : {})".format(
+            arn, response['ResponseMetadata']['RequestId']))
+        return True
 
 @click.command()
 @click.option("--config_file", default="config.yaml", help="Specify the config to use")
 def main(config_file):
+
+    # Init
     logging.basicConfig(
         format='%(asctime)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -123,18 +209,26 @@ def main(config_file):
     expiring_certs = []
     global REGION
 
-    if "acm_region" in config_file:
-        REGION = config_file["acm_region"]
+    if "acm_region" in config:
+        REGION = config["acm_region"]
+    dynamodb_table_name = config["dynamo_db_name"]
 
     client = boto3.client('acm', region_name=REGION)
 
-    certs = client.list_certificates(
+    dynamodb = boto3.resource('dynamodb', region_name=REGION)
+    dynamo_table = dynamodb.Table(dynamodb_table_name)
+
+    acm_certs = client.list_certificates(
         CertificateStatuses=['ISSUED'],
         MaxItems=123
     )
 
+    # Retrieve certificate for which notification has already been done
+    already_notified = get_notified_certs(dynamo_table)
+
+    # Check ACM certificate expiration date
     today = pytz.UTC.localize(datetime.datetime.now())
-    for cert in certs["CertificateSummaryList"]:
+    for cert in acm_certs["CertificateSummaryList"]:
         cert_detail = client.describe_certificate(
             CertificateArn=cert["CertificateArn"]
         )
@@ -146,15 +240,26 @@ def main(config_file):
                 criticality= 'Warning'
             else:
                 continue
-            expiring_certs.append({
-                'CertName': cert_detail["Certificate"]["CertificateArn"],
-                'ExpireDate': cert_detail["Certificate"]["NotAfter"],
-                'InUseBy': cert_detail["Certificate"]["InUseBy"],
-                'DomainName': cert_detail["Certificate"]["DomainName"],
-                'Criticality': criticality,
-            })
 
+            if cert_detail["Certificate"]["CertificateArn"] not in already_notified:
+                expiring_certs.append({
+                    'CertName': cert_detail["Certificate"]["CertificateArn"],
+                    'ExpireDate': cert_detail["Certificate"]["NotAfter"],
+                    'InUseBy': cert_detail["Certificate"]["InUseBy"],
+                    'DomainName': cert_detail["Certificate"]["DomainName"],
+                    'Criticality': criticality,
+                })
+
+    # Start notification process
     if expiring_certs:
-        notify(config, expiring_certs)
+        notify(config, expiring_certs, dynamo_table)
+
+    # Clear DynamoDB
+    for arn in already_notified:
+        if arn not in [cert["CertificateArn"] for cert in acm_certs["CertificateSummaryList"]]:
+            logging.info("Delete {} from db since it isn't in acm anymore".format(arn))
+            del_notified_cert(dynamo_table, arn)
+
+    logging.info("ACM Check Complete")
 if __name__ == "__main__":
     main()
