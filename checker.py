@@ -24,7 +24,6 @@ def notify(config, expirings_certs, notification_db):
     for expirings_cert in expirings_certs:
         title, message = format_message(expirings_cert)
         notified = False
-        add_notified_cert(notification_db, expirings_cert["CertName"])
         for notifier_config in config["notifiers"]:
             if notifier_config.get("type", "").lower() == "zendesk":
                 try:
@@ -34,7 +33,7 @@ def notify(config, expirings_certs, notification_db):
                 except Exception as e:
                     logging.error("Can't create zendesk ticket: {}".format(e))
             if notified:
-                add_notified_cert(notification_db, expirings_cert["CertName"])
+                add_notified_cert(notification_db, expirings_cert["CertName"], expirings_cert["Criticality"])
 
 def format_message(expiring_cert):
     """
@@ -147,10 +146,10 @@ def get_notified_certs(table):
     except ClientError as e:
         raise(e)
     else:
-        return [ cert["arn"] for cert in response['Items']]
+        return [ (cert["arn"], cert["criticality"]) for cert in response['Items']]
 
 
-def add_notified_cert(table, arn):
+def add_notified_cert(table, arn, criticality):
     """
     Add record about a notification for given arn
     :param table: Dynamo table use to store record
@@ -161,7 +160,8 @@ def add_notified_cert(table, arn):
         response = table.put_item(
             Item={
                 'arn': arn,
-                'notifiedTime': str(datetime.datetime.utcnow())
+                'notifiedTime': str(datetime.datetime.utcnow()),
+                'criticality': criticality
             }
         )
     except Exception as e:
@@ -241,7 +241,7 @@ def main(config_file):
             else:
                 continue
 
-            if cert_detail["Certificate"]["CertificateArn"] not in already_notified:
+            if (cert_detail["Certificate"]["CertificateArn"], criticality) not in already_notified:
                 expiring_certs.append({
                     'CertName': cert_detail["Certificate"]["CertificateArn"],
                     'ExpireDate': cert_detail["Certificate"]["NotAfter"],
@@ -255,7 +255,7 @@ def main(config_file):
         notify(config, expiring_certs, dynamo_table)
 
     # Clear DynamoDB
-    for arn in already_notified:
+    for (arn, criticality) in already_notified:
         if arn not in [cert["CertificateArn"] for cert in acm_certs["CertificateSummaryList"]]:
             logging.info("Delete {} from db since it isn't in acm anymore".format(arn))
             del_notified_cert(dynamo_table, arn)
