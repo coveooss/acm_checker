@@ -6,6 +6,9 @@ on:
         description: "Semantic version to be built"
         required: true
         type: string
+permissions:
+  contents: read
+
 jobs:
   push_to_registries:
     name: Push Docker image to GHCR
@@ -15,6 +18,11 @@ jobs:
       contents: read
     
     steps:
+    - name: Harden Runner
+      uses: step-security/harden-runner@v2
+      with:
+        egress-policy: audit
+
     - name: Check out the repo
       uses: actions/checkout@v2
         
